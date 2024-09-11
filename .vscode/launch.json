@@ -13,22 +13,29 @@
         //     "webRoot": "${workspaceFolder}"
         // },
         {
-            "python": "/mnt/A/hust_reg/anaconda3/envs/mink/bin/python",
+            "python": "/home/djf/anaconda3/envs/cu116/bin/python",
             "name": "Python: Remote Attach",
             "type": "python",
             "request": "launch",
             "stopOnEntry": true,
-            "program": "./test_3DMatch.py",
+            // "program": "./test_3DMatch.py",
+            // "program": "./test_3DLoMatch.py",
+            "program": "./test_KITTI.py",
             // "program": "./experiments/geotransformer.3dmatch/test_denoise.py",
             "console": "integratedTerminal",
             "justMyCode": true,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "3",
+                "OMP_NUM_THREADS": "12",
+                "CUDA_VISIBLE_DEVICES": "0",
                 "PYTHONPATH": "${workspaceRoot}",
             },
             "args": [
                 "--config_path",
-                "config_json/config_3DMatch.json"
+                // "config_json/config_3DMatch_FPFH.json"
+                // "config_json/config_3DMatch_FCGF.json"
+                // "config_json/config_3DLoMatch_FCGF.json"
+                // "config_json/config_3DLoMatch_Predator.json"
+                "config_json/config_KITTI_FCGF.json"
             ]
 
         }

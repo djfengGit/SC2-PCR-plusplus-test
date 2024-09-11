@@ -176,7 +176,7 @@ if __name__ == '__main__':
     config = edict(config)
 
     import os
-    os.environ['CUDA_VISIBLE_DEVICES'] = config.CUDA_Devices
+    # os.environ['CUDA_VISIBLE_DEVICES'] = config.CUDA_Devices
     if not os.path.exists("./logs"):
         os.makedirs("./logs")
     log_filename = f'logs/3DMatch-{config.descriptor}.log'

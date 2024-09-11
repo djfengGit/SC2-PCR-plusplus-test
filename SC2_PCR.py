@@ -2,7 +2,8 @@ import torch
 from common import knn, rigid_transform_3d
 from utils.SE3 import transform
 import numpy as np
-
+import open3d as o3d
+from utils.timer import Timer
 
 
 class Matcher():
@@ -49,17 +50,25 @@ class Matcher():
         """
         assert scores.shape[0] == 1
 
+            # 白旭阳这里的写法很巧妙，运算速度快，且能保证，至少选出一个局部最大，即全局score最大的点
         # parallel Non Maximum Suppression (more efficient)
         score_relation = scores.T >= scores  # [num_corr, num_corr], save the relation of leading_eig
         # score_relation[dists[0] >= R] = 1  # mask out the non-neighborhood node
+            # 首先，只有当score_relation的一行全为True时，该行才会被选中
+            # 条件1：score_relation.bool(): 如果该点是局部最大，则局部内都会为True，邻域外可能有False 
+            # 条件2：(dists[0] >= R).bool() : 小于R的都为False, 大于R的都置为True
+            # 条件1 | 条件2: 如果该行是局部最大，则要想办法将改行的所有False都置为True，或操作：条件1的邻域外的False由条件2置为True
+            #       条件2的邻域内全为False，则当条件1的邻域内全为True时候，说明是局部score最大，该行选中
         score_relation = score_relation.bool() | (dists[0] >= R).bool()
+            # 这里注意min，只要该行有一个False，则标记为0，只有当score_relation的一行全为True时，才标记为1
         is_local_max = score_relation.min(-1)[0].float()
 
         score_local_max = scores * is_local_max
         sorted_score = torch.argsort(score_local_max, dim=1, descending=True)
 
         # max_num = scores.shape[1]
-
+            # NMS仅能选出100-200个点，其他都是随机的，因为argsort遇到相同数值是随机排序
+            # 选前max_num个局部最大
         return_idx = sorted_score[:, 0: max_num].detach()
 
         return return_idx
@@ -125,7 +134,7 @@ class Matcher():
         tgt_dist = ((tgt_knn_fine[:, :, :, None, :] - tgt_knn_fine[:, :, None, :, :]) ** 2).sum(-1) ** 0.5
         cross_dist = torch.abs(src_dist - tgt_dist)
         local_hard_measure = (cross_dist < self.d_thre * 2).float()
-        local_SC2_measure = torch.matmul(local_hard_measure, local_hard_measure) / k2
+        local_SC2_measure = torch.matmul(local_hard_measure, local_hard_measure) / k2   # 因为是求和，所以这里要除以k2,以归一化到0-1
         local_SC_measure = torch.clamp(1 - cross_dist ** 2 / self.d_thre ** 2, min=0)
         # local_SC2_measure = local_SC_measure * local_SC2_measure
         local_SC2_measure = local_SC_measure
@@ -309,13 +318,15 @@ class Matcher():
             - tgt_keypts_corr [bs, N_C, 3]  target points of N_C one-to-one correspondences
         """
 
+            # https://github.com/ZhiChen902/SC2-PCR/issues/13
+            # 这里选择为每一个src_keypts生成correspondence：性能最高
         N_src = src_features.shape[1]
         N_tgt = tgt_features.shape[1]
         # use all point or sample points.
-        if self.num_node == 'all':
+        if self.num_node == 'all':      # 默认select all  3DLoMatch:5000
             src_sel_ind = np.arange(N_src)
             tgt_sel_ind = np.arange(N_tgt)
-        else:
+        else:                           # 3DMatch下面代码实际上没执行，3DLoMatch执行
             #src_sel_ind = np.random.choice(N_src, self.num_node)
             if self.num_node < N_tgt:
                 tgt_sel_ind = np.random.choice(N_tgt, self.num_node)
@@ -327,10 +338,12 @@ class Matcher():
             else:
                 src_sel_ind = np.arange(N_src)
             # tgt_sel_ind = np.random.choice(N_tgt, self.num_node)
+
         src_desc = src_features[:, src_sel_ind, :]
         tgt_desc = tgt_features[:, tgt_sel_ind, :]
         src_keypts = src_keypts[:, src_sel_ind, :]
         tgt_keypts = tgt_keypts[:, tgt_sel_ind, :]
+            # 采样后要返回，覆盖原来src_keypts，否则后续几何一致性计算会报错
 
         # match points in feature space.
         distance = torch.sqrt(2 - 2 * (src_desc[0] @ tgt_desc[0].T) + 1e-6)
@@ -351,7 +364,24 @@ class Matcher():
         src_keypts_corr = src_keypts[:, corr[:, 0]]
         tgt_keypts_corr = tgt_keypts[:, corr[:, 1]]
 
-        return src_keypts, relax_match_points, relax_distance, src_keypts_corr, tgt_keypts_corr
+
+            # select corr: max_points=8000 for saving gpu memory
+        if not isinstance(self.max_points, str):
+            
+            num_corr = src_keypts_corr.shape[1]
+            if num_corr > self.max_points:
+                corr_select_ind = np.random.choice(num_corr, self.max_points, replace=False)  # 无放回抽样
+                src_keypts_corr = src_keypts_corr[:, corr_select_ind, :]
+                tgt_keypts_corr = tgt_keypts_corr[:, corr_select_ind, :]
+                # src_normals_corr = src_normals_corr[:, corr_select_ind, :]
+                # tgt_normals_corr = tgt_normals_corr[:, corr_select_ind, :]
+
+                relax_match_points = relax_match_points[:, corr_select_ind, :, :]
+                relax_distance = relax_distance[:, corr_select_ind, :]
+                # relax_match_normals = relax_match_normals[:, corr_select_ind, :, :]
+
+        return src_keypts, tgt_keypts, relax_match_points, relax_distance, src_keypts_corr, tgt_keypts_corr
+
 
     def select_best_trans(self, seed_trans, src_keypts, relax_match_points, relax_distance, src_keypts_corr, tgt_keypts_corr):
 
@@ -374,6 +404,8 @@ class Matcher():
         best_trans = None
         best_fitness = 0
 
+        src_keypts = src_keypts_corr # 可能超过了8000
+
         for i in range(seed_num):
             # 1. refine the transformation by the one-to-one correspondences
             initial_trans = seed_trans[:, i, :, :]
@@ -383,17 +415,21 @@ class Matcher():
             warped_src_keypts = transform(src_keypts, initial_trans)
             cross_dist = torch.norm((warped_src_keypts[:, :, None, :] - relax_match_points), dim=-1)
             warped_neighbors = (cross_dist <= self.inlier_threshold).float()
+                # 用self.inlier_threshold筛掉一定不可能的匹配
             renew_distance = relax_distance + 2 * (cross_dist > self.inlier_threshold * 1.5).float()
             _, mask_min_idx = renew_distance.min(dim=-1)
 
             # 3. find the correspondences whose alignment error is less than the threshold
+                # corr.shape == src_keypts.shape
+                # 这里corr是允许特征的次优构成匹配对，相比IC放宽了
             corr = torch.cat([torch.arange(mask_min_idx.shape[1])[:, None].cuda(), mask_min_idx[0][:, None]], dim=-1)
-            verify_mask = warped_neighbors
-            verify_mask_row = verify_mask.sum(-1) > 0
+            
+            verify_mask = warped_neighbors  # inlier，corr中存的是索引，需要从src_keypts取出索引对应的坐标值
+            verify_mask_row = verify_mask.sum(-1) > 0   # > 0表示在K个候选中有一个或几个候选满足内点距离阈值，则可以作为inlier
 
             # 4. use the spatial consistency to verify the correspondences
-            if verify_mask_row.float().sum() > 0:
-                verify_mask_row_idx = torch.where(verify_mask_row == True)
+            if verify_mask_row.float().sum() > 0:       # 该initial_trans的inlier指标大于0，可以进一步验证
+                verify_mask_row_idx = torch.where(verify_mask_row == True)      # 找到inlier
                 corr_select = corr[verify_mask_row_idx[1]]
                 select_relax_match_points = relax_match_points[:, verify_mask_row_idx[1]]
                 src_keypts_corr = src_keypts[:, corr_select[:, 0]]
@@ -407,7 +443,7 @@ class Matcher():
                 corr_compatibility_2 = (abs_corr_compatibility < SC_thre).float()
                 compatibility_num = torch.sum(corr_compatibility_2, -1)
                 renew_fitness = torch.max(compatibility_num)
-            else:
+            else:   # 该initial_trans的inlier指标不大于0，即该trans太差，没有inlier，则直接舍弃该trans
                 renew_fitness = 0
 
             if renew_fitness > best_fitness:
@@ -489,7 +525,7 @@ class Matcher():
         #################################
         # generate coarse correspondences
         #################################
-        src_keypts, relax_match_points, relax_distance, src_keypts_corr, tgt_keypts_corr = self.match_pair(src_keypts, tgt_keypts, src_features, tgt_features)
+        src_keypts, tgt_keypts, relax_match_points, relax_distance, src_keypts_corr, tgt_keypts_corr = self.match_pair(src_keypts, tgt_keypts, src_features, tgt_features)
 
         #################################
         # use the proposed SC2-PCR to estimate the rigid transformation

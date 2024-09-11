@@ -5,7 +5,7 @@
     "ratio": 0.2,
     "k1": 60,
     "k2": 50,
-    "data_path": "./snapshot/indoor/3DLoMatch",
+    "data_path": "./data/3DLoMatch",
     "descriptor": "predator",
     "inlier_threshold": 0.1,
     "sigma_d": 0.1,
